@@ -2,8 +2,10 @@ use failure::Error;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::{
+  fs::{self, File},
   io::{self, prelude::*},
   net::{Ipv4Addr, SocketAddrV4, TcpListener},
+  path::{Path, PathBuf},
   thread,
 };
 
@@ -23,39 +25,79 @@ fn run() -> Result<(), Error> {
 
       let (stream, _addr) = accepted;
       let mut stream = io::BufReader::new(stream);
+      let mut string = String::new();
+      let path;
 
       {
-        let mut string = String::new();
+        string.clear();
         stream.read_line(&mut string).unwrap();
 
         match FIRST_LINE_REGEX.captures(&*string) {
           Some(c) => {
-            let verb = c.name("verb").unwrap();
-            let path = c.name("path").unwrap();
-            let ver = c.name("ver").unwrap();
+            // let verb = c.name("verb").unwrap();
+            let path_cap = c.name("path").unwrap();
+            // let ver = c.name("ver").unwrap();
 
-            println!("verb: {:?}; path: {:?}; version: {:?}", verb, path, ver);
+            path = path_cap.as_str().to_owned();
           },
           None => return,
         }
       }
 
       loop {
-        let mut string = String::new();
+        string.clear();
         stream.read_line(&mut string).unwrap();
 
         match &*string {
           "\r\n" => break,
-          s => println!("{:?}", s),
+          _ => {},
         }
       }
 
       let mut stream = io::BufWriter::new(stream.into_inner());
+      let path = PathBuf::from(path.trim_start_matches("/"));
 
-      write!(stream, "HTTP/1.1 200 OK\r\n").unwrap();
-      write!(stream, "Content-Type: text/plain; charset=UTF-8\r\n").unwrap();
-      write!(stream, "\r\n").unwrap();
-      write!(stream, "get fukt").unwrap();
+      fn four04<W: Write>(stream: &mut W) {
+        write!(stream, "HTTP/1.1 404 NotFound\r\n").unwrap();
+        write!(stream, "Content-Type: text/plain; charset=UTF-8\r\n").unwrap();
+        write!(stream, "\r\nThe file you requested was not found.").unwrap();
+      }
+
+      fn five00<W: Write, E: Into<Error>>(stream: &mut W, err: E) {
+        write!(stream, "HTTP/1.1 500 ServerError\r\n").unwrap();
+        write!(stream, "Content-Type: text/plain; charset=UTF-8").unwrap();
+        write!(stream, "\r\n{:#?}", err.into()).unwrap();
+      }
+
+      println!("{:?}", path);
+
+      match fs::metadata(path.clone()) {
+        Ok(m) => {
+          if !m.is_file() {
+            four04(&mut stream);
+            return;
+          }
+        },
+        Err(ref e) if e.kind() == io::ErrorKind::NotFound => {
+          four04(&mut stream);
+          return;
+        },
+        Err(e) => {
+          five00(&mut stream, e);
+          return;
+        },
+      }
+
+      match File::open(path) {
+        Ok(mut f) => {
+          write!(stream, "HTTP/1.1 200 OK\r\n").unwrap();
+          write!(stream, "Content-Type: text/plain; charset=UTF-8\r\n").unwrap();
+          write!(stream, "\r\n").unwrap();
+
+          io::copy(&mut f, &mut stream).unwrap();
+        },
+        Err(e) => five00(&mut stream, e),
+      }
 
       stream.flush().unwrap();
     });
